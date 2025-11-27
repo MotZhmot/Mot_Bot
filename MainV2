@@ -1,0 +1,221 @@
+# В данном файле будет реализован телеграм-бот
+import emoji
+from moviepy.editor import VideoFileClip, concatenate_videoclips
+from PIL import Image, ImageDraw, ImageFont
+from gtts import gTTS
+import pygame
+from mutagen.mp3 import MP3
+from moviepy.editor import *
+import moviepy.editor as mpe
+import os
+from pydub import AudioSegment
+import json
+import time
+import base64
+import re  # для split
+import requests
+import telebot  # - модуль  с помощью, которого делать бота, как его установить смотри статью, которую я скинул в гайде
+
+# ========== НАСТРОЙКИ ==========
+# ЗАМЕНИ ЭТИ ЗНАЧЕНИЯ НА СВОИ
+
+# Твой телеграм токен бота
+TELEGRAM_TOKEN = ''
+
+# Ключи от Fusion Brain API
+FUSIONBRAIN_API_KEY = ''
+FUSIONBRAIN_SECRET_KEY = ''
+FUSIONBRAIN_URL = 'https://api-key.fusionbrain.ai/'
+
+# Путь к папке где лежит main.py (замени на свой путь)
+BASE_PATH = r""
+
+# ========== КОНЕЦ НАСТРОЕК ==========
+
+def movies_builder(TEXT1, images):
+    kol = 0
+    for i in TEXT1:
+        image = Image.open(images[kol])
+
+        # КОНВЕРТИРУЕМ ИЗОБРАЖЕНИЕ ИЗ RGBA В RGB
+        if image.mode == 'RGBA':
+            image = image.convert('RGB')
+
+        font = ImageFont.truetype("arial.ttf", 50)
+        drawer = ImageDraw.Draw(image)
+        drawer.text((200, 750), i, font=font, fill='black')
+
+        image_path = os.path.join(BASE_PATH, str(kol) + '2.jpg')
+        image.save(image_path)
+        kol += 1
+        
+    time = []
+    for i in range(0, len(TEXT1)):
+        tts = gTTS(TEXT1[i], lang='ru')
+        # ИСПРАВЛЕНИЕ: используем уникальное имя для каждого MP3 файла
+        mp3_filename = os.path.join(BASE_PATH, f"output_{i}.mp3")
+        tts.save(mp3_filename)
+        pygame.mixer.init()
+        pygame.mixer.music.load(mp3_filename)
+        pygame.mixer.music.play()
+        f = MP3(mp3_filename)
+        f1 = int(f.info.length)
+        time.append(f1)
+        pygame.mixer.music.stop()
+        pygame.mixer.quit()
+        
+    clips = {}
+    for i in range(0, len(TEXT1)):
+        image_path = os.path.join(BASE_PATH, str(i) + "2.jpg")
+        clips1 = ImageClip(image_path).set_duration(int(time[i]))
+        clips["var" + str(i)] = clips1
+        
+    l = list(clips.values())
+    finalcl = concatenate_videoclips([*l], method="compose")
+    video_path = os.path.join(BASE_PATH, 'video.mp4')
+    finalcl.write_videofile(video_path, fps=24)
+
+    # ИСПРАВЛЕНИЕ: используем правильные имена MP3 файлов
+    sound = AudioSegment.from_mp3(os.path.join(BASE_PATH, "output_0.mp3"))
+    for i in range(1, len(TEXT1)):
+        sound1 = AudioSegment.from_mp3(os.path.join(BASE_PATH, f"output_{i}.mp3"))
+        sound += sound1
+        
+    result_mp3_path = os.path.join(BASE_PATH, "Result.mp3")
+    sound.export(result_mp3_path, format="mp3")
+
+    vidos = VideoFileClip(video_path)
+    video_length = vidos.duration
+
+    audio_background = mpe.AudioFileClip(result_mp3_path)
+    my_clip = mpe.VideoFileClip(video_path)
+    filename, file_extension = os.path.splitext(video_path)
+
+    new_audioclip = mpe.CompositeAudioClip([audio_background])
+    my_clip.audio = new_audioclip
+    output_path = os.path.join(BASE_PATH, "video_with_audio.mp4")
+    my_clip.write_videofile(output_path, codec="libx264", fps=24, audio_codec='aac')
+    
+    logo_path = os.path.join(BASE_PATH, "LOGO.mp4")
+    if os.path.exists(logo_path):
+        clip1 = VideoFileClip(logo_path)
+        clip2 = VideoFileClip(output_path)
+        final_clip = concatenate_videoclips([clip1, clip2], method="compose")
+        ready_path = os.path.join(BASE_PATH, "ready.mp4")
+        final_clip.write_videofile(ready_path)
+    else:
+        # Если лого нет, просто переименовываем
+        ready_path = os.path.join(BASE_PATH, "ready.mp4")
+        os.rename(output_path, ready_path)
+        
+    return 0
+
+
+# Класс для работы с Fusion Brain API
+class FusionBrainAPI:
+    def __init__(self, url, api_key, secret_key):
+        self.URL = url
+        self.AUTH_HEADERS = {
+            'X-Key': f'Key {api_key}',
+            'X-Secret': f'Secret {secret_key}',
+        }
+
+    def get_pipeline(self):
+        response = requests.get(self.URL + 'key/api/v1/pipelines', headers=self.AUTH_HEADERS)
+        data = response.json()
+        return data[0]['id']
+
+    def generate(self, prompt, pipeline_id, images=1, width=1024, height=1024):
+        params = {
+            "type": "GENERATE",
+            "numImages": images,
+            "width": width,
+            "height": height,
+            "generateParams": {
+                "query": f"{prompt}"
+            }
+        }
+
+        data = {
+            'pipeline_id': (None, pipeline_id),
+            'params': (None, json.dumps(params), 'application/json')
+        }
+        response = requests.post(self.URL + 'key/api/v1/pipeline/run', headers=self.AUTH_HEADERS, files=data)
+        data = response.json()
+        return data['uuid']
+
+    def check_generation(self, request_id, attempts=10, delay=10):
+        while attempts > 0:
+            response = requests.get(self.URL + 'key/api/v1/pipeline/status/' + request_id, headers=self.AUTH_HEADERS)
+            data = response.json()
+            if data['status'] == 'DONE':
+                return data['result']['files']
+            attempts -= 1
+            time.sleep(delay)
+
+
+# Инициализация бота
+bot = telebot.TeleBot(TELEGRAM_TOKEN)
+
+
+# Функция, обрабатывающая команду /start
+@bot.message_handler(commands=["start"])
+def start(m, res=False):
+    bot.send_message(m.chat.id,
+                     'Привет! ' + '\U0001F603' + '\nЯ бот, который генерирует видеоряд с озвучкой по тексту' + '\U0001F60E')
+
+
+# Получение сообщений от юзера
+@bot.message_handler(content_types=['text'])
+def draw(message):
+    delet2 = bot.send_message(message.chat.id, "Генерация картинок..." + '\U0001F914')
+    IMAGES = []
+    po_zaprosu = re.split(r'[;.!?]\s', message.text)
+    po_zaprosu = [i for i in po_zaprosu if i.strip()]  # Удаляем пустые строки
+    
+    stix_path = os.path.join(BASE_PATH, "STIX.txt")
+    with open(stix_path, "w+", encoding='utf-8') as file:
+        file.write(message.text)
+        
+    text = " "
+    with open(stix_path, 'r', encoding='utf-8') as file:
+        for line in file:
+            text += line
+            
+    text = re.split('[\n]', text)
+    stroka = ' '.join(text)
+    mess_text = re.split(r'[;.!?]\s', stroka)
+    mess_text = [i for i in mess_text if i.strip()]  # Удаляем пустые строки
+    
+    krt = 1
+    for i in mess_text:
+        # ИСПОЛЬЗУЕМ НАСТРОЙКИ ИЗ ВЕРХНЕЙ ЧАСТИ
+        api = FusionBrainAPI(FUSIONBRAIN_URL, FUSIONBRAIN_API_KEY, FUSIONBRAIN_SECRET_KEY)
+        pipeline_id = api.get_pipeline()
+        prompt_text = "картинка, которое обозначает " + " ' " + i + " ' "
+        uuid = api.generate(prompt_text.lower(), pipeline_id)
+        files = api.check_generation(uuid)
+        if files:
+            image_base64 = files[0]
+            image_data = base64.b64decode(image_base64)
+            image_path = os.path.join(BASE_PATH, str(krt) + ".jpg")
+            with open(image_path, "wb") as file:
+                file.write(image_data)
+            IMAGES.append(image_path)
+        krt += 1
+        
+    delet1 = bot.send_message(message.chat.id, "Сборка видео..." + '\U0001F9D0')
+    movies_builder(po_zaprosu, IMAGES)
+    bot.delete_message(message.chat.id, delet2.message_id)
+    bot.delete_message(message.chat.id, delet1.message_id)
+    
+    ready_path = os.path.join(BASE_PATH, "ready.mp4")
+    video_ = open(ready_path, 'rb')
+    bot.send_video(message.chat.id, video_)
+    bot.send_message(message.chat.id, "Видео готово!" + '\U0001F4AA')
+
+
+# Запускаем бота
+if __name__ == "__main__":
+    print(f"Бот запущен! Рабочая папка: {BASE_PATH}")
+    bot.polling(none_stop=True, interval=0)
